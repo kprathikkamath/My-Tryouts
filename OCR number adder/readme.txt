@@ -1,0 +1,1 @@
+This uses Pytesseract library and creates a 120mb .exe file if built using pyinstaller. 
