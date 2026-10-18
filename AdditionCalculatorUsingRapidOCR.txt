@@ -1,0 +1,304 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+from pynput import mouse, keyboard
+from PIL import Image, ImageGrab, ImageTk
+from rapidocr_onnxruntime import RapidOCR
+import numpy as np
+import threading
+
+class AppController:
+    def __init__(self):
+        # --- 1. INITIALIZE MAIN ROOT WINDOW FIRST ---
+        self.control_root = tk.Tk()
+        self.control_root.title("Floating Calculator Settings")
+        self.control_root.geometry("320x460")
+        self.control_root.config(bg="#2b2b2b")
+        self.control_root.attributes("-topmost", True)
+
+        # --- 2. INITIALIZE RAPID OCR ENGINE ---
+        self.ocr_engine = RapidOCR()
+
+        # --- 3. NOW CREATE TKINTER VARIABLES ---
+        self.mode = tk.StringVar(value="manual")  # "manual" or "predefined"
+        self.box_width = tk.IntVar(value=120)
+        self.box_height = tk.IntVar(value=30)
+        
+        self.pref_x = tk.IntVar(value=100)
+        self.pref_y = tk.IntVar(value=100)
+        self.pref_w = tk.IntVar(value=120)
+        self.pref_h = tk.IntVar(value=30)
+
+        self.total = 0.0
+        self.expression_history = []
+        self.picking_mode = False
+        self.calc_visible = False
+
+        # --- GUI Layout ---
+        tk.Label(self.control_root, text="Calculator Control Panel", bg="#1e1e1e", fg="white", font=("Arial", 10, "bold")).pack(fill=tk.X, pady=5)
+
+        mode_frame = tk.LabelFrame(self.control_root, text=" Operation Mode ", bg="#2b2b2b", fg="white", font=("Arial", 9, "bold"))
+        mode_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Radiobutton(mode_frame, text="Manual Mode (Click on screen digits)", variable=self.mode, value="manual", bg="#2b2b2b", fg="white", selectcolor="#1e1e1e", command=self.toggle_mode_ui).pack(anchor="w", padx=5, pady=2)
+        tk.Radiobutton(mode_frame, text="Predefined Location Mode (Static Box)", variable=self.mode, value="predefined", bg="#2b2b2b", fg="white", selectcolor="#1e1e1e", command=self.toggle_mode_ui).pack(anchor="w", padx=5, pady=2)
+
+        size_frame = tk.LabelFrame(self.control_root, text=" Customizable Box Size ", bg="#2b2b2b", fg="white", font=("Arial", 9, "bold"))
+        size_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        w_frame = tk.Frame(size_frame, bg="#2b2b2b")
+        w_frame.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(w_frame, text="Width (px):", bg="#2b2b2b", fg="white", width=12, anchor="w").pack(side=tk.LEFT)
+        self.w_slider = tk.Scale(w_frame, from_=30, to=400, orient=tk.HORIZONTAL, variable=self.box_width, bg="#2b2b2b", fg="white", highlightbackground="#2b2b2b", command=self.update_preview)
+        self.w_slider.pack(side=tk.RIGHT, expand=True, fill=tk.X)
+
+        h_frame = tk.Frame(size_frame, bg="#2b2b2b")
+        h_frame.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(h_frame, text="Height (px):", bg="#2b2b2b", fg="white", width=12, anchor="w").pack(side=tk.LEFT)
+        self.h_slider = tk.Scale(h_frame, from_=15, to=150, orient=tk.HORIZONTAL, variable=self.box_height, bg="#2b2b2b", fg="white", highlightbackground="#2b2b2b", command=self.update_preview)
+        self.h_slider.pack(side=tk.RIGHT, expand=True, fill=tk.X)
+
+        preview_frame = tk.LabelFrame(self.control_root, text=" Box Size Visual Preview ", bg="#2b2b2b", fg="white", font=("Arial", 8, "bold"))
+        preview_frame.pack(fill=tk.X, padx=10, pady=2)
+        
+        self.preview_canvas = tk.Canvas(preview_frame, width=280, height=60, bg="#1e1e1e", highlightthickness=0)
+        self.preview_canvas.pack(pady=5)
+
+        self.coord_frame = tk.LabelFrame(self.control_root, text=" Predefined Region Coordinates ", bg="#2b2b2b", fg="white", font=("Arial", 9, "bold"))
+        self.coord_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        c_grid = tk.Frame(self.coord_frame, bg="#2b2b2b")
+        c_grid.pack(padx=5, pady=5)
+        
+        tk.Label(c_grid, text="X:", bg="#2b2b2b", fg="white").grid(row=0, column=0, padx=2)
+        tk.Entry(c_grid, textvariable=self.pref_x, width=6).grid(row=0, column=1, padx=2)
+        tk.Label(c_grid, text="Y:", bg="#2b2b2b", fg="white").grid(row=0, column=2, padx=2)
+        tk.Entry(c_grid, textvariable=self.pref_y, width=6).grid(row=0, column=3, padx=2)
+        tk.Label(c_grid, text="Width:", bg="#2b2b2b", fg="white").grid(row=1, column=0, padx=2, pady=4)
+        tk.Entry(c_grid, textvariable=self.pref_w, width=6).grid(row=1, column=1, padx=2, pady=4)
+        tk.Label(c_grid, text="Height:", bg="#2b2b2b", fg="white").grid(row=1, column=2, padx=2, pady=4)
+        tk.Entry(c_grid, textvariable=self.pref_h, width=6).grid(row=1, column=3, padx=2, pady=4)
+
+        tk.Label(self.control_root, text="Shortcut: Press [Ctrl + Shift + Q] anywhere", bg="#2b2b2b", fg="#00ffcc", font=("Arial", 8)).pack(pady=5)
+
+        # --- 4. FLOATING CALCULATOR GUI ---
+        self.calc_root = tk.Toplevel(self.control_root)
+        self.calc_root.title("Floating Adder")
+        self.calc_root.attributes("-topmost", True)
+        self.calc_root.overrideredirect(True)
+        self.calc_root.geometry("240x130+200+200")
+        self.calc_root.config(bg="#2b2b2b")
+        
+        self.calc_root.bind("<B1-Motion>", self.move_window)
+        self.calc_root.bind("<Button-1>", self.get_pos)
+        
+        title_label = tk.Label(self.calc_root, text="Addition Calculator", bg="#1e1e1e", fg="white", font=("Arial", 9, "bold"))
+        title_label.pack(fill=tk.X, pady=2)
+        title_label.bind("<B1-Motion>", self.move_window)
+        title_label.bind("<Button-1>", self.get_pos)
+        
+        display_frame = tk.Frame(self.calc_root, bg="#1e1e1e", relief=tk.SUNKEN, bd=1)
+        display_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.expr_var = tk.StringVar(value="")
+        expr_label = tk.Label(display_frame, textvariable=self.expr_var, font=("Arial", 9), bg="#1e1e1e", fg="#888", anchor="e")
+        expr_label.pack(fill=tk.X, padx=5, pady=(2, 0))
+        
+        self.display_var = tk.StringVar(value="0.0")
+        display_label = tk.Label(display_frame, textvariable=self.display_var, font=("Arial", 16, "bold"), bg="#1e1e1e", fg="#00ffcc", anchor="e")
+        display_label.pack(fill=tk.X, padx=5, pady=(0, 3))
+        
+        btn_frame = tk.Frame(self.calc_root, bg="#2b2b2b")
+        btn_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        self.action_btn = tk.Button(btn_frame, text="Pick Number", command=self.handle_action_click, bg="#007acc", fg="white", font=("Arial", 9))
+        self.action_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
+        
+        clear_btn = tk.Button(btn_frame, text="Clear", command=self.clear_calc, bg="#d9534f", fg="white", font=("Arial", 9))
+        clear_btn.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
+        
+        close_btn = tk.Button(btn_frame, text="X", command=self.hide_calc, bg="#444", fg="white", font=("Arial", 9))
+        close_btn.pack(side=tk.LEFT, padx=2)
+
+        self.calc_root.withdraw()
+
+        self.toggle_mode_ui()
+        self.update_preview()
+        self.setup_listeners()
+
+    def toggle_mode_ui(self):
+        if self.mode.get() == "manual":
+            self.action_v_text = "Pick Number"
+            for child in self.coord_frame.winfo_children():
+                for sub in child.winfo_children():
+                    if isinstance(sub, tk.Entry):
+                        sub.config(state="disabled")
+        else:
+            self.action_v_text = "Capture"
+            for child in self.coord_frame.winfo_children():
+                for sub in child.winfo_children():
+                    if isinstance(sub, tk.Entry):
+                        sub.config(state="normal")
+        
+        if self.calc_root.winfo_viewable():
+            self.action_btn.config(text=self.action_v_text)
+
+    def update_preview(self, event=None):
+        self.preview_canvas.delete("all")
+        w = self.box_width.get()
+        h = self.box_height.get()
+        
+        canvas_w = 280
+        canvas_h = 60
+        scale = min((canvas_w - 20) / w, (canvas_h - 10) / h, 1.0)
+        
+        draw_w = int(w * scale)
+        draw_h = int(h * scale)
+        
+        x0 = (canvas_w - draw_w) // 2
+        y0 = (canvas_h - draw_h) // 2
+        x1 = x0 + draw_w
+        y1 = y0 + draw_h
+        
+        self.preview_canvas.create_rectangle(x0, y0, x1, y1, outline="#00ffcc", width=2, fill="#252525")
+        self.preview_canvas.create_text(canvas_w // 2, canvas_h // 2, text=f"{w} x {h} px", fill="white", font=("Arial", 8))
+
+    def get_pos(self, event):
+        self.x_offset = event.x
+        self.y_offset = event.y
+
+    def move_window(self, event):
+        deltax = event.x - self.x_offset
+        deltay = event.y - self.y_offset
+        x = self.calc_root.winfo_x() + deltax
+        y = self.calc_root.winfo_y() + deltay
+        self.calc_root.geometry(f"+{x}+{y}")
+
+    def handle_action_click(self):
+        if self.mode.get() == "manual":
+            self.picking_mode = not self.picking_mode
+            if self.picking_mode:
+                self.action_btn.config(bg="#f0ad4e", text="Click Number...")
+            else:
+                self.action_btn.config(bg="#007acc", text="Pick Number")
+        else:
+            x = self.pref_x.get()
+            y = self.pref_y.get()
+            w = self.pref_w.get()
+            h = self.pref_h.get()
+            threading.Thread(target=self.process_ocr_region, args=(x, y, w, h), daemon=True).start()
+
+    def clear_calc(self):
+        self.total = 0.0
+        self.expression_history = []
+        self.display_var.set("0.0")
+        self.expr_var.set("")
+
+    def hide_calc(self):
+        self.calc_root.withdraw()
+        self.calc_visible = False
+        self.picking_mode = False
+        self.action_btn.config(bg="#007acc", text=self.action_v_text)
+
+    def show_calc(self):
+        self.calc_root.deiconify()
+        self.calc_root.attributes("-topmost", True)
+        self.calc_root.lift()
+        self.calc_root.focus_force()
+        self.calc_visible = True
+        self.action_btn.config(text=self.action_v_text)
+
+    def setup_listeners(self):
+        self.hotkey = keyboard.GlobalHotKeys({
+            '<ctrl>+<shift>+q': self.show_calc
+        })
+        self.hotkey.start()
+
+        self.mouse_listener = mouse.Listener(on_click=self.on_click)
+        self.mouse_listener.start()
+
+    def on_click(self, x, y, button, pressed):
+        if pressed and button == mouse.Button.left and self.picking_mode and self.calc_visible and self.mode.get() == "manual":
+            self.picking_mode = False
+            
+            w = self.box_width.get()
+            h = self.box_height.get()
+            left = max(0, x - w // 2)
+            top = max(0, y - h // 2)
+            
+            threading.Thread(target=self.process_ocr_region, args=(left, top, w, h), daemon=True).start()
+
+    def process_ocr_region(self, left, top, width, height):
+        try:
+            self.calc_root.after(0, lambda: self.action_btn.config(bg="#5bc0de", text="Reading..."))
+            
+            right = left + width
+            bottom = top + height
+            
+            screenshot = ImageGrab.grab(bbox=(left, top, right, bottom))
+            
+            # Convert PIL Image to Numpy array for RapidOCR
+            img_np = np.array(screenshot)
+            result, _ = self.ocr_engine(img_np)
+            
+            text = ""
+            if result:
+                # RapidOCR returns a list of items: [ [box], text, score ]
+                text = " ".join([item[1] for item in result]).strip()
+            
+            clean_text = "".join([c for c in text if c.isdigit() or c in ['.', '-']])
+            
+            number = 0.0
+            added_successfully = False
+            if clean_text:
+                try:
+                    number = float(clean_text)
+                    self.total += number
+                    added_successfully = True
+                    self.calc_root.after(0, lambda: self.update_calculator(number))
+                except ValueError:
+                    pass
+
+            self.calc_root.after(0, lambda: self.show_preview_window(screenshot, text, clean_text, added_successfully))
+                
+        except Exception as e:
+            print(f"Error during OCR processing: {e}")
+        finally:
+            self.calc_root.after(0, lambda: self.action_btn.config(bg="#007acc", text=self.action_v_text))
+
+    def update_calculator(self, number):
+        self.expression_history.append(str(number))
+        expr_text = " + ".join(self.expression_history)
+        self.expr_var.set(expr_text)
+        self.display_var.set(str(self.total))
+
+    def show_preview_window(self, img, raw_text, clean_text, success):
+        preview = tk.Toplevel(self.calc_root)
+        preview.title("OCR Preview")
+        preview.attributes("-topmost", True)
+        preview.geometry("260x200")
+        preview.config(bg="#2b2b2b")
+        
+        header = tk.Label(preview, text="OCR Detection Result", bg="#1e1e1e", fg="white", font=("Arial", 9, "bold"))
+        header.pack(fill=tk.X, pady=2)
+        
+        display_img = img.resize((200, 50), Image.Resampling.NEAREST)
+        img_tk = ImageTk.PhotoImage(display_img)
+        
+        img_label = tk.Label(preview, image=img_tk, bg="white", relief=tk.SOLID, bd=1)
+        img_label.image = img_tk
+        img_label.pack(pady=5)
+        
+        info_frame = tk.Frame(preview, bg="#2b2b2b")
+        info_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        tk.Label(info_frame, text=f"Raw Text Read: '{raw_text}'", fg="#ddd", bg="#2b2b2b", font=("Arial", 8), anchor="w").pack(fill=tk.X)
+        tk.Label(info_frame, text=f"Cleaned Number: '{clean_text}'", fg="#5cb85c" if success else "#d9534f", bg="#2b2b2b", font=("Arial", 9, "bold"), anchor="w").pack(fill=tk.X, pady=2)
+        
+        tk.Button(preview, text="OK", command=preview.destroy, bg="#007acc", fg="white", font=("Arial", 8)).pack(pady=5)
+
+    def run(self):
+        self.control_root.mainloop()
+
+if __name__ == "__main__":
+    app = AppController()
+    app.run()
